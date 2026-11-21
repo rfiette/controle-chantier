@@ -40,6 +40,17 @@ L'icône « Contrôle » apparaît sur l'écran d'accueil. L'app s'ouvre en plei
 
 Astuce : vous pouvez préparer les points au bureau en saisissant uniquement les cotes plan (statut « À mesurer »), puis compléter les cotes mesurées sur le chantier.
 
+### Plans DAO (DXF) : cotes et éléments cliquables
+
+Un plan exporté en **DXF** depuis AutoCAD, Revit ou un autre logiciel de DAO s'importe avec **Ajouter un plan**. L'app reconnaît alors :
+- les **cotes** : on touche le texte d'une cote, la cote plan se remplit toute seule, et il reste à saisir la mesure ;
+- les **éléments** (blocs : douche, WC, baignoire, porte, poteau…) : on touche l'élément et on le marque Conforme, Non conforme ou Levée ;
+- les **vues** du fichier (RDC, RDJ, façades…), dont chacune devient une page ;
+- les **calques**, à afficher ou masquer par lot (bouton Calques), avec le nombre d'éléments contrôlés par calque.
+
+Pour l'export : lier les XREF (`XREF` → *Lier*), ne pas décomposer les cotes ni les blocs, puis *Enregistrer sous* DXF.
+Les très gros fichiers (plus de 100 Mo en DXF) sont à importer depuis le PC, puis à passer sur la tablette avec *Sauvegarde* → *Importer une sauvegarde*.
+
 ## 4. Sauvegardes : important
 
 Les données sont stockées dans le navigateur de l'appareil. Si l'app est supprimée, ou si la tablette est perdue ou réinitialisée, elles sont perdues.

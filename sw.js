@@ -1,6 +1,6 @@
 // Service worker : met l'app en cache pour fonctionner sans réseau sur le chantier.
 // ⚠ Augmenter VERSION à chaque mise en ligne d'une nouvelle version.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = 'controle-chantier-' + VERSION;
 const ASSETS = [
   './',
@@ -14,6 +14,7 @@ const ASSETS = [
   'js/viewer.js',
   'js/report.js',
   'js/export.js',
+  'js/dxf.js',
   'vendor/pdf.min.js',
   'vendor/pdf.worker.min.js',
   'vendor/jspdf.umd.min.js',
@@ -23,7 +24,12 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' : on ignore le cache HTTP pour être sûr de récupérer la nouvelle version
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {

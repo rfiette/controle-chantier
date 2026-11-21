@@ -38,6 +38,7 @@ export const STATUS = {
   non_conforme: { label: 'Non conforme', color: '#d64545' },
   a_reprendre: { label: 'À reprendre', color: '#dd6b20' },
   a_verifier: { label: 'À mesurer', color: '#718096' },
+  a_controler: { label: 'À contrôler', color: '#718096' },
   observation: { label: 'Observation', color: '#2b6cb0' },
   conforme: { label: 'Conforme', color: '#1f9d55' },
   levee: { label: 'Levée', color: '#1f9d55' },
@@ -52,12 +53,18 @@ export function pointStatus(p) {
     if (e == null) return 'a_verifier';
     return Math.abs(e) <= (p.tol ?? 0) + 1e-9 ? 'conforme' : 'non_conforme';
   }
+  if (p.type === 'element') return p.elStatus || 'a_controler';
   return p.remStatus || 'observation';
 }
 
 export const isProblem = (st) => st === 'non_conforme' || st === 'a_reprendre';
+export const isTodo = (st) => st === 'a_verifier' || st === 'a_controler';
+
+export const typeLabel = (p) => (p.type === 'cote' ? 'Contrôle de cote' : p.type === 'element' ? 'Élément' : 'Remarque');
 
 export function isEmptyPoint(p, photoCount) {
+  // Point lié à une cote / un élément du plan : vide tant que rien n'a été contrôlé
+  if (p.ref) return (p.type === 'cote' ? p.mesure == null : !p.elStatus) && !p.comment && !photoCount;
   return !p.title && p.theo == null && p.mesure == null && !p.comment && !photoCount;
 }
 

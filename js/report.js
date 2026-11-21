@@ -1,10 +1,11 @@
 // Rapport PDF de contrôle (jsPDF) : synthèse, plans repérés, détail des points avec extrait de plan et photos.
 import * as db from './db.js';
-import { STATUS, pointStatus, ecartOf, fmtMm, fmtEcart, fmtNum, fmtDate, loadImage } from './util.js';
+import { STATUS, pointStatus, ecartOf, fmtMm, fmtEcart, fmtNum, fmtDate, loadImage, typeLabel } from './util.js';
 import { loadSource } from './viewer.js';
 
 const M = 14; // marge (mm)
-const ORDER = ['non_conforme', 'a_reprendre', 'a_verifier', 'observation', 'conforme', 'levee'];
+const ORDER = ['non_conforme', 'a_reprendre', 'a_verifier', 'a_controler', 'observation', 'conforme', 'levee'];
+const pageLabel = (pl, page) => (pl?.pageCount > 1 ? ` – ${pl.pageNames?.[page - 1] || 'p.' + page}` : '');
 const WINANSI_EXTRA = '€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ';
 
 // Les polices standard du PDF ne gèrent que l'alphabet latin (WinAnsi)
@@ -184,8 +185,8 @@ export async function buildReport(project, { onProgress = () => {} } = {}) {
     const pl = planById[p.planId];
     const vals = [
       String(p.num),
-      p.title || (cote ? 'Cote' : 'Remarque'),
-      (pl?.name || '') + (pl?.pageCount > 1 ? ` p.${p.page}` : ''),
+      p.title || typeLabel(p),
+      (pl?.name || '') + pageLabel(pl, p.page),
       cote ? fmtNum(p.theo) : '',
       cote ? fmtNum(p.mesure) : '',
       cote && ecartOf(p) != null ? fmtEcart(ecartOf(p)) : '',
@@ -226,7 +227,7 @@ export async function buildReport(project, { onProgress = () => {} } = {}) {
 
       doc.addPage('a4', ov.w > ov.h ? 'l' : 'p');
       font(12, 'bold');
-      text(fit(`Plan : ${pl.name}${pl.pageCount > 1 ? ` (page ${pg})` : ''}`, pw() - 2 * M), M, M + 2);
+      text(fit(`Plan : ${pl.name}${pl.pageCount > 1 ? ` (${pl.pageNames?.[pg - 1] || 'page ' + pg})` : ''}`, pw() - 2 * M), M, M + 2);
       font(8.5, 'normal', '#5b6878');
       text(`${pgPts.length} point(s) – les numéros renvoient au détail ci-après`, M, M + 7);
       const boxW = pw() - 2 * M;
@@ -274,13 +275,14 @@ export async function buildReport(project, { onProgress = () => {} } = {}) {
     font(10, 'bold', '#ffffff');
     text(String(p.num), M + 5.5, y, { align: 'center' });
     font(11, 'bold');
-    text(fit(p.title || (cote ? 'Contrôle de cote' : 'Remarque'), pw() - 2 * M - 52), M + 14, y);
+    text(fit(p.title || typeLabel(p), pw() - 2 * M - 52), M + 14, y);
     font(8, 'bold');
     const lw = doc.getTextWidth(clean(S.label)) + 4;
     chip(S.label, pw() - M - lw, y - 1, S.color, 8);
     y += 5.5;
     font(8.5, 'normal', '#5b6878');
-    text(fit(`${cote ? 'Contrôle de cote' : 'Remarque'} · Plan : ${pl?.name || ''}${pl?.pageCount > 1 ? ` p.${p.page}` : ''} · ${fmtDate(p.createdAt)}${p.author ? ' · ' + p.author : ''}`, pw() - 2 * M), M + 14, y);
+    const lot = p.type === 'element' ? p.elLayer : p.ref ? p.dimLayer : '';
+    text(fit(`${typeLabel(p)}${lot ? ` (${lot})` : ''} · Plan : ${pl?.name || ''}${pageLabel(pl, p.page)} · ${fmtDate(p.createdAt)}${p.author ? ' · ' + p.author : ''}`, pw() - 2 * M), M + 14, y);
     y += 6;
 
     if (cote) {

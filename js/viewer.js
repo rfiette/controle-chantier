@@ -6,6 +6,28 @@ const MAX_ZOOM = 10; // zoom maximum par rapport à la résolution de base
 
 /** Ouvre un fichier de plan. render(page, maxPx) → { canvas, page, scale } */
 export async function loadSource(blob, kind) {
+  if (kind === 'vector') {
+    const data = JSON.parse(await blob.text());
+    return {
+      kind,
+      data,
+      pageCount: data.pages.length,
+      async render(pageNum, maxPx) {
+        const pg = data.pages[pageNum - 1];
+        const k = maxPx / Math.max(pg.w, pg.h);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(pg.w * k));
+        canvas.height = Math.max(1, Math.round(pg.h * k));
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(k, 0, 0, k, 0, 0);
+        drawVectorPage(ctx, pg, { s: k, paths: buildPaths(pg), dimLayers: dimLayerSet(pg), lineScale: Math.max(1, maxPx / 2000) });
+        return { canvas, page: null, scale: k };
+      },
+      destroy() {},
+    };
+  }
   if (kind === 'pdf') {
     const data = new Uint8Array(await blob.arrayBuffer());
     const doc = await window.pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
@@ -376,6 +398,7 @@ export class PlanViewer {
   destroy() {
     this.cancelSharp();
     cancelAnimationFrame(this.raf);
+    this.raf = 0;
     this.ro.disconnect();
     const c = this.stage.querySelector('canvas');
     if (c) c.width = c.height = 0;
@@ -388,5 +411,224 @@ export class PlanViewer {
     this.el.removeEventListener('pointercancel', this._up);
     this.el.removeEventListener('wheel', this._wheel);
     this.el.removeEventListener('gesturestart', this._gesture);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Plans vectoriels (issus d'un DXF) : cotes et éléments cliquables     */
+/* ------------------------------------------------------------------ */
+
+const LINE_COLOR = '#30363d';
+const TEXT_COLOR = '#1d232b';
+const DIM_COLOR = '#1d5fb4';
+
+export function buildPaths(pg) {
+  return pg.layers.map((L) => {
+    const p = new Path2D();
+    for (const a of L.p) {
+      p.moveTo(a[0], a[1]);
+      for (let i = 2; i < a.length; i += 2) p.lineTo(a[i], a[i + 1]);
+    }
+    return p;
+  });
+}
+
+export const dimLayerSet = (pg) => new Set(pg.dims.map((d) => d.l));
+
+/**
+ * Dessine une page vectorielle. Le contexte doit déjà être transformé (unités : mm du plan).
+ * o.px = pixels (canevas) par mm ; o.view = zone visible [x0,y0,x1,y1] ; o.marks = objets contrôlés.
+ */
+export function drawVectorPage(ctx, pg, o) {
+  const px = o.px || o.s;
+  const hidden = o.hidden || new Set();
+  const vis = o.view || [0, 0, pg.w, pg.h];
+  const marks = o.marks || [];
+  for (const m of marks) {
+    const b = m.bb;
+    ctx.fillStyle = m.color + '30';
+    ctx.fillRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+  }
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = (o.lineScale || 1) / px;
+  pg.layers.forEach((L, i) => {
+    if (hidden.has(L.n)) return;
+    ctx.strokeStyle = o.dimLayers && o.dimLayers.has(L.n) ? DIM_COLOR : LINE_COLOR;
+    ctx.stroke(o.paths[i]);
+  });
+  const minH = 3 / px;
+  let font = '';
+  for (const t of pg.texts) {
+    const [x, y, h, r, s, al, li] = t;
+    if (h < minH) continue;
+    const L = pg.layers[li];
+    if (L && hidden.has(L.n)) continue;
+    const reach = h * (s.length + 2);
+    if (x + reach < vis[0] || x - reach > vis[2] || y + reach < vis[1] || y - reach > vis[3]) continue;
+    ctx.fillStyle = L && o.dimLayers && o.dimLayers.has(L.n) ? DIM_COLOR : TEXT_COLOR;
+    const f = `${Math.round(h * 14) / 10}px Arial, Helvetica, sans-serif`;
+    if (f !== font) { ctx.font = f; font = f; }
+    ctx.textAlign = al[0] === 'c' ? 'center' : al[0] === 'r' ? 'right' : 'left';
+    ctx.textBaseline = al[1] === 't' ? 'top' : al[1] === 'm' ? 'middle' : 'alphabetic';
+    const lines = s.split('\n');
+    const lh = h * 1.66;
+    let oy = al[1] === 't' ? 0 : al[1] === 'm' ? (-(lines.length - 1) * lh) / 2 : -(lines.length - 1) * lh;
+    ctx.save();
+    ctx.translate(x, y);
+    if (r) ctx.rotate((-r * Math.PI) / 180);
+    for (const line of lines) {
+      ctx.fillText(line, 0, oy);
+      oy += lh;
+    }
+    ctx.restore();
+  }
+  // Objets contrôlés : contour coloré + numéro
+  for (const m of marks) {
+    const b = m.bb;
+    ctx.strokeStyle = m.color;
+    ctx.lineWidth = 2.5 / px;
+    ctx.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+  }
+  const R = 11 / px;
+  ctx.font = `bold ${12 / px}px Arial, Helvetica, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const m of marks) {
+    const bx = m.bb[2];
+    const by = m.bb[1];
+    ctx.beginPath();
+    ctx.arc(bx, by, R, 0, Math.PI * 2);
+    ctx.fillStyle = m.color;
+    ctx.fill();
+    ctx.lineWidth = 2 / px;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(String(m.num), bx, by + 0.5 / px);
+  }
+  if (o.selected) {
+    const b = o.selected;
+    const e = 5 / px;
+    ctx.setLineDash([6 / px, 4 / px]);
+    ctx.strokeStyle = '#f28c28';
+    ctx.lineWidth = 3 / px;
+    ctx.strokeRect(b[0] - e, b[1] - e, b[2] - b[0] + 2 * e, b[3] - b[1] + 2 * e);
+    ctx.setLineDash([]);
+  }
+}
+
+export class VectorViewer extends PlanViewer {
+  constructor(el, opts) {
+    super(el, opts);
+    this.canvas = document.createElement('canvas');
+    this.canvas.className = 'v-vec';
+    el.insertBefore(this.canvas, this.pinLayer);
+    this.stage.style.display = 'none';
+    this.hidden = new Set();
+    this.marks = [];
+    this.selected = null;
+  }
+
+  async showPage(n) {
+    this.pg = this.src.data.pages[n - 1];
+    this.W = this.pg.w;
+    this.H = this.pg.h;
+    this.paths = buildPaths(this.pg);
+    this.dimLayers = dimLayerSet(this.pg);
+    this.fit();
+  }
+
+  clampScale(s) {
+    const f = this.fitScale;
+    return Math.min(Math.max(s, f * 0.5), Math.max(f * 400, 3));
+  }
+
+  focusOn(x, y, opts = {}) {
+    super.focusOn(x, y, { minZoomFactor: 8, ...opts });
+  }
+
+  apply() {
+    if (this.raf) return;
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0;
+      this.draw();
+      this.positionPins();
+    });
+  }
+
+  renderSharp() {}
+  cancelSharp() {}
+
+  draw() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const c = this.canvas;
+    const cw = Math.round(this.vw * dpr);
+    const ch = Math.round(this.vh * dpr);
+    if (c.width !== cw || c.height !== ch) {
+      c.width = cw;
+      c.height = ch;
+      c.style.width = this.vw + 'px';
+      c.style.height = this.vh + 'px';
+    }
+    const ctx = c.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    if (!this.pg) return;
+    const k = this.s * dpr;
+    ctx.setTransform(k, 0, 0, k, this.tx * dpr, this.ty * dpr);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, this.W, this.H);
+    const view = [-this.tx / this.s, -this.ty / this.s, (this.vw - this.tx) / this.s, (this.vh - this.ty) / this.s];
+    drawVectorPage(ctx, this.pg, {
+      px: k, paths: this.paths, dimLayers: this.dimLayers, hidden: this.hidden, view, marks: this.marks, selected: this.selected,
+    });
+  }
+
+  setHiddenLayers(set) {
+    this.hidden = set;
+    this.apply();
+  }
+
+  /** marks : [{bb, color, num}] ; selected : bb ou null */
+  setMarks(marks, selected) {
+    this.marks = marks;
+    this.selected = selected;
+    this.apply();
+  }
+
+  /** Cote ou élément sous le doigt (coordonnées 0..1) */
+  hitTest(qx, qy) {
+    const pg = this.pg;
+    if (!pg) return null;
+    const x = qx * this.W;
+    const y = qy * this.H;
+    const tol = 18 / this.s;
+    const hid = this.hidden;
+    let dim = null;
+    let bd = Infinity;
+    for (const d of pg.dims) {
+      if (hid.has(d.l)) continue;
+      const dist = Math.hypot(x - d.tx, y - d.ty);
+      if (dist < bd) { bd = dist; dim = d; }
+    }
+    if (bd > tol * 2) dim = null;
+    let el = null;
+    let ba = Infinity;
+    for (const e of pg.els) {
+      if (hid.has(e.l)) continue;
+      const b = e.bb;
+      if (x < b[0] - tol / 2 || x > b[2] + tol / 2 || y < b[1] - tol / 2 || y > b[3] + tol / 2) continue;
+      const a = (b[2] - b[0]) * (b[3] - b[1]);
+      if (a < ba) { ba = a; el = e; }
+    }
+    if (dim && (!el || bd < tol)) return { kind: 'dim', obj: dim };
+    if (el) return { kind: 'el', obj: el };
+    return null;
+  }
+
+  destroy() {
+    super.destroy();
+    this.canvas.width = this.canvas.height = 0;
   }
 }

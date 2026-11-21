@@ -1,6 +1,6 @@
 // Export CSV (Excel) et sauvegarde / restauration d'un chantier complet.
 import * as db from './db.js';
-import { uid, STATUS, pointStatus, ecartOf, fmtDate, blobToDataURL } from './util.js';
+import { uid, STATUS, pointStatus, ecartOf, fmtDate, blobToDataURL, typeLabel } from './util.js';
 
 const num = (n) => (n == null ? '' : String(Math.round(n * 10) / 10).replace('.', ','));
 const cell = (v) => {
@@ -12,14 +12,15 @@ export async function buildCsv(project) {
   const plans = Object.fromEntries((await db.byIndex('plans', 'projectId', project.id)).map((p) => [p.id, p]));
   const points = (await db.byIndex('points', 'projectId', project.id)).sort((a, b) => a.num - b.num);
   const rows = [[
-    'N°', 'Plan', 'Page', 'Type', 'Libellé / localisation', 'Cote plan (mm)', 'Cote mesurée (mm)', 'Écart (mm)',
+    'N°', 'Plan', 'Page / vue', 'Type', 'Libellé / localisation', 'Cote plan (mm)', 'Cote mesurée (mm)', 'Écart (mm)',
     'Tolérance ± (mm)', 'Statut', 'Remarque', 'Photos', 'Créé le', 'Modifié le', 'Contrôleur',
   ]];
   for (const p of points) {
     const photos = await db.countByIndex('photos', 'pointId', p.id);
     const cote = p.type === 'cote';
     rows.push([
-      p.num, plans[p.planId]?.name ?? '', p.page, cote ? 'Cote' : 'Remarque', p.title,
+      p.num, plans[p.planId]?.name ?? '', plans[p.planId]?.pageNames?.[p.page - 1] ?? p.page,
+      typeLabel(p) + (p.elLayer ? ` (${p.elLayer})` : ''), p.title,
       cote ? num(p.theo) : '', cote ? num(p.mesure) : '', cote ? num(ecartOf(p)) : '', cote ? num(p.tol) : '',
       STATUS[pointStatus(p)].label, p.comment, photos, fmtDate(p.createdAt), fmtDate(p.updatedAt), p.author,
     ]);

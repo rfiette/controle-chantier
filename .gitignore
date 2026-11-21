@@ -1,2 +1,6 @@
 .claude/
 exemples/
+# Plans clients : ne jamais publier
+plans-dwg/
+*.dwg
+*.dxf

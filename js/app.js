@@ -1,10 +1,10 @@
 import * as db from './db.js';
 import {
-  esc, uid, STATUS, pointStatus, parseNum, fmtNum, fmtMm, fmtEcart, fmtDate, ecartOf, isEmptyPoint, isProblem,
-  compressImage, safeFileName, today,
+  esc, uid, STATUS, pointStatus, parseNum, fmtNum, fmtMm, fmtEcart, fmtDate, ecartOf, isEmptyPoint, isProblem, isTodo,
+  typeLabel, compressImage, safeFileName, today,
 } from './util.js';
 import { ICON, toast, modal, confirmDialog, formDialog, loading, shareOrDownload, pickFiles } from './ui.js';
-import { PlanViewer, loadSource, makeThumbnail } from './viewer.js';
+import { PlanViewer, VectorViewer, loadSource, makeThumbnail } from './viewer.js';
 import { buildCsv, exportBackup, importBackup } from './export.js';
 
 window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
@@ -47,7 +47,7 @@ async function viewHome() {
   const points = await db.all('points');
   const stats = (id) => {
     const ps = points.filter((p) => p.projectId === id);
-    return { n: ps.length, pb: ps.filter((p) => isProblem(pointStatus(p))).length, todo: ps.filter((p) => pointStatus(p) === 'a_verifier').length };
+    return { n: ps.length, pb: ps.filter((p) => isProblem(pointStatus(p))).length, todo: ps.filter((p) => isTodo(pointStatus(p))).length };
   };
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const hideTip = localStorageGet('hideInstallTip');
@@ -79,7 +79,7 @@ async function viewHome() {
               <div class="chips">
                 <span class="chip">${s.n} point${s.n > 1 ? 's' : ''}</span>
                 ${s.pb ? `<span class="chip" style="--c:${STATUS.non_conforme.color}">${s.pb} à traiter</span>` : ''}
-                ${s.todo ? `<span class="chip" style="--c:${STATUS.a_verifier.color}">${s.todo} à mesurer</span>` : ''}
+                ${s.todo ? `<span class="chip" style="--c:${STATUS.a_verifier.color}">${s.todo} à contrôler</span>` : ''}
               </div>
               <div class="muted small">Modifié le ${fmtDate(p.updatedAt)}</div>
             </a>`;
@@ -169,14 +169,14 @@ async function openSettings() {
 const FILTERS = [
   ['all', 'Tous'],
   ['pb', 'À traiter'],
-  ['todo', 'À mesurer'],
+  ['todo', 'À contrôler'],
   ['obs', 'Observations'],
   ['ok', 'Conformes / levés'],
 ];
 const matchFilter = (f, st) =>
   f === 'all' ||
   (f === 'pb' && isProblem(st)) ||
-  (f === 'todo' && st === 'a_verifier') ||
+  (f === 'todo' && isTodo(st)) ||
   (f === 'obs' && st === 'observation') ||
   (f === 'ok' && (st === 'conforme' || st === 'levee'));
 
@@ -207,7 +207,7 @@ async function viewProject(id) {
     <main class="page">
       <section class="stats">
         <div class="stat"><b>${points.length}</b><span>points</span></div>
-        ${['non_conforme', 'a_reprendre', 'a_verifier', 'observation', 'conforme', 'levee']
+        ${['non_conforme', 'a_reprendre', 'a_verifier', 'a_controler', 'observation', 'conforme', 'levee']
           .filter((k) => counts[k])
           .map((k) => `<div class="stat" style="--c:${STATUS[k].color}"><b>${counts[k]}</b><span>${STATUS[k].label}</span></div>`)
           .join('')}
@@ -290,15 +290,14 @@ async function viewProject(id) {
         go('#/');
       }
     } else if (act === 'add-plan') {
-      const files = await pickFiles({ accept: 'application/pdf,.pdf,image/*', multiple: true });
+      const files = await pickFiles({ accept: 'application/pdf,.pdf,image/*,.dxf', multiple: true });
       if (!files.length) return;
       const l = loading('Import du plan…');
       let ok = 0;
       for (const f of files) {
         try {
           l.set(`Import de ${f.name}…`);
-          await importPlan(project, f);
-          ok++;
+          if (await importPlan(project, f, (m) => l.set(m))) ok++;
         } catch (err) {
           console.error(err);
           toast(`Impossible de lire ${f.name}`);
@@ -370,23 +369,45 @@ function pointRow(p, plan) {
   if (p.type === 'cote') {
     detail = `Plan ${fmtMm(p.theo)} · Mesuré ${fmtMm(p.mesure)}${ecartOf(p) != null ? ` · Écart ${fmtEcart(ecartOf(p))}` : ''}`;
   }
+  if (p.type === 'element' && p.elLayer) detail = esc(p.elLayer);
   const comment = p.comment ? `<div class="pt-comment">${esc(p.comment)}</div>` : '';
   return `<button class="pt-row" data-pt="${p.id}" data-plan="${p.planId}">
     <span class="badge" style="background:${S.color}">${p.num}</span>
     <span class="pt-main">
-      <span class="pt-title">${esc(p.title || (p.type === 'cote' ? 'Cote' : 'Remarque'))}</span>
-      <span class="pt-sub muted small">${p.type === 'cote' ? 'Cote' : 'Remarque'} · ${esc(plan?.name || '')}${plan?.pageCount > 1 ? ` p.${p.page}` : ''}${detail ? ' · ' + detail : ''}</span>
+      <span class="pt-title">${esc(p.title || typeLabel(p))}</span>
+      <span class="pt-sub muted small">${typeLabel(p)} · ${esc(plan?.name || '')}${plan?.pageCount > 1 ? ` · ${esc(plan.pageNames?.[p.page - 1] || 'p.' + p.page)}` : ''}${detail ? ' · ' + detail : ''}</span>
       ${comment}
     </span>
     <span class="status" style="--c:${S.color}">${S.label}</span>
   </button>`;
 }
 
-async function importPlan(project, f) {
+async function importPlan(project, f, progress = () => {}) {
   const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
-  const kind = isPdf ? 'pdf' : 'image';
-  // Copie en mémoire (les fichiers choisis sur iPad peuvent devenir inaccessibles ensuite)
-  const blob = new Blob([await f.arrayBuffer()], { type: f.type || (isPdf ? 'application/pdf' : 'image/jpeg') });
+  const isDxf = /\.dxf$/i.test(f.name);
+  let kind = isPdf ? 'pdf' : 'image';
+  let blob;
+  let pageNames;
+  if (isDxf) {
+    kind = 'vector';
+    const { parseDxfFile, prepareDxf } = await import('./dxf.js');
+    const st = await parseDxfFile(f, (r) => progress(`Lecture de ${f.name}… ${Math.round(r * 100)} %`));
+    progress('Analyse des cotes et des éléments…');
+    await new Promise((r) => setTimeout(r, 30));
+    const prep = prepareDxf(st);
+    if (!prep.views.length) throw new Error('DXF vide');
+    let sel = prep.views.map((_, i) => i);
+    if (prep.views.length > 1) {
+      sel = await chooseViews(f.name, prep.views);
+      if (!sel || !sel.length) return false;
+    }
+    const plan = prep.build(sel);
+    pageNames = plan.pages.map((p) => p.name);
+    blob = new Blob([JSON.stringify(plan)], { type: 'application/json' });
+  } else {
+    // Copie en mémoire (les fichiers choisis sur iPad peuvent devenir inaccessibles ensuite)
+    blob = new Blob([await f.arrayBuffer()], { type: f.type || (isPdf ? 'application/pdf' : 'image/jpeg') });
+  }
   const src = await loadSource(blob, kind);
   const thumb = await makeThumbnail(src);
   const pageCount = src.pageCount;
@@ -394,7 +415,25 @@ async function importPlan(project, f) {
   const fileId = uid();
   await db.put('files', { id: fileId, blob });
   await db.put('plans', {
-    id: uid(), projectId: project.id, name: f.name.replace(/\.[^.]+$/, ''), kind, fileId, pageCount, thumb, createdAt: Date.now(),
+    id: uid(), projectId: project.id, name: f.name.replace(/\.[^.]+$/, ''), kind, fileId, pageCount, pageNames, thumb, createdAt: Date.now(),
+  });
+  return true;
+}
+
+/** Choix des vues à garder dans un DXF (plans de niveaux, façades, coupes…) */
+function chooseViews(fileName, views) {
+  const box = document.createElement('div');
+  box.className = 'view-choice';
+  box.innerHTML = `<p class="muted small">Le fichier ${esc(fileName)} contient plusieurs vues. Chaque vue choisie devient une page du plan.</p>
+    ${views.map((v, i) => `<label class="check-row"><input type="checkbox" value="${i}" ${v.dims || v.els ? 'checked' : ''}>
+      <span><strong>${esc(v.name)}</strong><span class="muted small"> · ${v.wm} × ${v.hm} m · ${v.dims} cotes · ${v.els} éléments</span></span></label>`).join('')}`;
+  return modal({
+    title: 'Vues à importer',
+    body: box,
+    actions: [
+      { label: 'Annuler', value: null },
+      { label: 'Importer', kind: 'primary', value: () => [...box.querySelectorAll('input:checked')].map((c) => +c.value) },
+    ],
   });
 }
 
@@ -419,6 +458,7 @@ async function viewPlan(planId, focusPointId) {
         <span class="pager-label"></span>
         <button class="icon-btn" data-act="next" aria-label="Page suivante">›</button>
       </div>
+      ${plan.kind === 'vector' ? `<button class="icon-btn" data-act="layers" aria-label="Calques">${ICON.layers}</button>` : ''}
       <button class="btn primary add-btn" data-act="add">${ICON.plus}<span>Point</span></button>
     </header>
     <div class="plan-body">
@@ -445,8 +485,12 @@ async function viewPlan(planId, focusPointId) {
   let currentPhotos = [];
   let saveTimer = 0;
   let photoUrls = [];
+  const isVector = plan.kind === 'vector';
+  let objIndex = new Map(); // identifiant DXF → cote / élément de la page
+  const layersKey = `layers:${plan.id}`;
 
-  const viewer = new PlanViewer(host, {
+  const Viewer = isVector ? VectorViewer : PlanViewer;
+  const viewer = new Viewer(host, {
     onTap: (x, y, inside) => onPlanTap(x, y, inside),
     onPinTap: (id) => {
       if (mode !== 'view') return;
@@ -462,12 +506,19 @@ async function viewPlan(planId, focusPointId) {
   };
 
   const refreshPins = () => {
+    const onPage = points.filter((p) => p.page === page);
+    // Sur un plan vectoriel, les points liés à une cote / un élément sont dessinés sur l'objet lui-même
+    const linked = (p) => isVector && p.ref && objIndex.has(p.ref.h);
     viewer.setPins(
-      points
-        .filter((p) => p.page === page)
-        .map((p) => ({ id: p.id, x: p.x, y: p.y, num: p.num, color: STATUS[pointStatus(p)].color })),
+      onPage.filter((p) => !linked(p)).map((p) => ({ id: p.id, x: p.x, y: p.y, num: p.num, color: STATUS[pointStatus(p)].color })),
       current?.id
     );
+    if (isVector) {
+      viewer.setMarks(
+        onPage.filter(linked).map((p) => ({ bb: objIndex.get(p.ref.h).bb, color: STATUS[pointStatus(p)].color, num: p.num })),
+        current?.ref ? objIndex.get(current.ref.h)?.bb || null : null
+      );
+    }
   };
 
   const setMode = (m) => {
@@ -483,8 +534,17 @@ async function viewPlan(planId, focusPointId) {
   const showPage = async (n) => {
     await closePoint();
     page = n;
-    app.querySelector('.pager-label').textContent = `${n} / ${plan.pageCount}`;
+    const pname = plan.pageNames?.[n - 1];
+    app.querySelector('.pager-label').textContent = pname ? `${pname} (${n}/${plan.pageCount})` : `${n} / ${plan.pageCount}`;
     await viewer.showPage(n);
+    if (isVector) {
+      objIndex = new Map();
+      for (const d of viewer.pg.dims) objIndex.set(d.h, d);
+      for (const e of viewer.pg.els) objIndex.set(e.h, e);
+      try {
+        viewer.setHiddenLayers(new Set(JSON.parse(localStorageGet(layersKey) || '[]')));
+      } catch { /* ignore */ }
+    }
     refreshPins();
   };
 
@@ -524,9 +584,77 @@ async function viewPlan(planId, focusPointId) {
       await savePoint();
       refreshPins();
       toast('Point déplacé');
-    } else if (current) {
-      await closePoint();
+    } else {
+      if (isVector) {
+        const hit = viewer.hitTest(x, y);
+        if (hit) return openObject(hit);
+      }
+      if (current) await closePoint();
     }
+  }
+
+  // Toucher une cote ou un élément du plan : ouvre (ou prépare) sa fiche de contrôle
+  async function openObject(hit) {
+    const o = hit.obj;
+    const existing = points.find((p) => p.ref && p.ref.h === o.h && p.page === page);
+    if (existing) return openPoint(existing);
+    await closePoint();
+    const all = await db.byIndex('points', 'projectId', project.id);
+    const now = Date.now();
+    const p = {
+      id: uid(), projectId: project.id, planId: plan.id, page,
+      num: all.reduce((m, q) => Math.max(m, q.num || 0), 0) + 1,
+      ref: { kind: hit.kind, h: o.h }, comment: '', author: settings.author, createdAt: now, updatedAt: now,
+      tol: settings.tol, theo: null, mesure: null,
+    };
+    if (hit.kind === 'dim') {
+      Object.assign(p, {
+        type: 'cote', x: o.tx / viewer.W, y: o.ty / viewer.H, title: `Cote ${o.t}${plan.pageNames ? ' – ' + plan.pageNames[page - 1] : ''}`,
+        theo: o.v, dimText: o.t, dimLayer: o.l,
+      });
+    } else {
+      Object.assign(p, {
+        type: 'element', x: (o.bb[0] + o.bb[2]) / 2 / viewer.W, y: (o.bb[1] + o.bb[3]) / 2 / viewer.H,
+        title: o.n, elLayer: o.l, elRaw: o.raw, elStatus: null,
+      });
+    }
+    points.push(p);
+    await db.put('points', p);
+    openPoint(p, false, true);
+  }
+
+  async function openLayers() {
+    const pg = viewer.pg;
+    const hidden = new Set(viewer.hidden);
+    const onPage = points.filter((p) => p.page === page && p.ref);
+    const rows = pg.layers.map((L) => {
+      const els = pg.els.filter((e) => e.l === L.n);
+      const dims = pg.dims.filter((d) => d.l === L.n);
+      const hs = new Set([...els, ...dims].map((o) => o.h));
+      const done = onPage.filter((p) => hs.has(p.ref.h) && !isTodo(pointStatus(p))).length;
+      return { n: L.n, els: els.length, dims: dims.length, done };
+    }).sort((a, b) => (b.els + b.dims > 0) - (a.els + a.dims > 0) || a.n.localeCompare(b.n, 'fr'));
+    const box = document.createElement('div');
+    box.className = 'layers-list';
+    box.innerHTML = `<div class="row"><button type="button" class="btn small" data-all="1">Tout afficher</button>
+      <button type="button" class="btn small" data-all="0">Tout masquer</button></div>
+      ${rows.map((r) => `<label class="check-row"><input type="checkbox" value="${esc(r.n)}" ${hidden.has(r.n) ? '' : 'checked'}>
+        <span><strong>${esc(r.n)}</strong>${r.els || r.dims ? `<span class="muted small"> · ${[
+          r.els ? `${r.els} élément${r.els > 1 ? 's' : ''}` : '', r.dims ? `${r.dims} cote${r.dims > 1 ? 's' : ''}` : '',
+        ].filter(Boolean).join(' · ')} · <b>${r.done} contrôlé${r.done > 1 ? 's' : ''}</b></span>` : ''}</span></label>`).join('')}`;
+    box.addEventListener('click', (e) => {
+      const all = e.target.closest('[data-all]');
+      if (all) box.querySelectorAll('input').forEach((c) => (c.checked = all.dataset.all === '1'));
+    });
+    const ok = await modal({
+      title: 'Calques',
+      body: box,
+      actions: [{ label: 'Annuler', value: false }, { label: 'Appliquer', value: true, kind: 'primary' }],
+    });
+    if (!ok) return;
+    const set = new Set([...box.querySelectorAll('input:not(:checked)')].map((c) => c.value));
+    localStorageSet(layersKey, JSON.stringify([...set]));
+    viewer.setHiddenLayers(set);
   }
 
   async function openPoint(p, focus = false, isNew = false) {
@@ -586,10 +714,13 @@ async function viewPlan(planId, focusPointId) {
         <button class="icon-btn" data-act="close" aria-label="Fermer">${ICON.close}</button>
       </div>
       <div class="sheet-body">
-        <div class="seg" data-seg="type">
+        ${p.ref ? `<div class="ref-info">${p.type === 'cote'
+          ? `Cote lue sur le plan : <strong>${esc(p.dimText)}</strong> → ${fmtMm(objIndex.get(p.ref.h)?.v ?? p.theo)}<span class="muted"> · calque ${esc(p.dimLayer)}</span>`
+          : `Élément du plan : <strong>${esc(objIndex.get(p.ref.h)?.n || p.title)}</strong><span class="muted"> · calque ${esc(p.elLayer)}</span>`}</div>`
+        : `<div class="seg" data-seg="type">
           <button type="button" data-v="cote">Contrôle de cote</button>
           <button type="button" data-v="remarque">Remarque</button>
-        </div>
+        </div>`}
         <label class="field"><span>Libellé / localisation</span>
           <input name="title" value="${esc(p.title)}" placeholder="ex : Voile V3 – longueur, file B" autocomplete="off"></label>
         <div class="cote-fields">
@@ -608,6 +739,14 @@ async function viewPlan(planId, focusPointId) {
             <button type="button" data-v="levee">Levée</button>
           </div>
         </div>
+        <div class="el-fields">
+          <span class="lbl">Contrôle de l'élément</span>
+          <div class="seg" data-seg="elStatus">
+            <button type="button" data-v="conforme">Conforme</button>
+            <button type="button" data-v="non_conforme">Non conforme</button>
+            <button type="button" data-v="levee">Levée</button>
+          </div>
+        </div>
         <label class="field"><span>Remarque sur l'exécution</span>
           <textarea name="comment" rows="3" placeholder="Constat, réserve, action demandée…">${esc(p.comment)}</textarea></label>
         <div class="photos">
@@ -622,12 +761,15 @@ async function viewPlan(planId, focusPointId) {
       </div>
       <div class="sheet-foot">
         <button class="btn danger-ghost" data-act="delete">Supprimer</button>
-        <button class="btn" data-act="move">Déplacer</button>
+        ${p.ref && isVector ? '' : '<button class="btn" data-act="move">Déplacer</button>'}
         <button class="btn primary" data-act="close">Terminé</button>
       </div>`;
     updateSheet();
     renderThumbs();
-    if (isNew) setTimeout(() => sheet.querySelector(p.type === 'cote' ? '[name="theo"]' : '[name="comment"]')?.focus({ preventScroll: true }), 80);
+    if (isNew && p.type !== 'element') {
+      const sel = p.type === 'cote' ? (p.ref ? '[name="mesure"]' : '[name="theo"]') : '[name="comment"]';
+      setTimeout(() => sheet.querySelector(sel)?.focus({ preventScroll: true }), 80);
+    }
   }
 
   function updateSheet() {
@@ -640,7 +782,8 @@ async function viewPlan(planId, focusPointId) {
     stEl.textContent = S.label;
     stEl.style.setProperty('--c', S.color);
     sheet.querySelector('.cote-fields').hidden = p.type !== 'cote';
-    sheet.querySelector('.rem-fields').hidden = p.type === 'cote';
+    sheet.querySelector('.rem-fields').hidden = p.type !== 'remarque';
+    sheet.querySelector('.el-fields').hidden = p.type !== 'element';
     for (const seg of sheet.querySelectorAll('[data-seg]')) {
       const val = p[seg.dataset.seg];
       for (const b of seg.children) b.classList.toggle('on', b.dataset.v === val);
@@ -767,6 +910,8 @@ async function viewPlan(planId, focusPointId) {
       viewer.zoomBy(1 / 1.6);
     } else if (act === 'fit') {
       viewer.fit();
+    } else if (act === 'layers') {
+      openLayers();
     }
   };
 
